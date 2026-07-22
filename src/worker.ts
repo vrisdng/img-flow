@@ -54,8 +54,11 @@ async function generate(
       }
     }
   }
+  const groupedPrompt = s.groupSnapshots?.length
+    ? `GROUPS USED\n${s.groupSnapshots.map((group) => `- ${group.path.join(" > ")}: ${group.materialIds.length} material(s)${group.notes ? `\n  Notes: ${group.notes}` : ""}`).join("\n")}\n\nUSER INSTRUCTIONS\n${s.prompt}`
+    : s.prompt;
   const effectivePrompt = buildImagePrompt(
-    s.prompt,
+    groupedPrompt,
     Boolean(s.parentCheckpointId),
     materialLabels,
   );
@@ -186,23 +189,46 @@ async function processJob(job: LeasedJob) {
     const storagePath = await storeOutputAtomic(result.buffer, ext, meta.mime);
     await updateProgress(job.id, job.project_id, "Creating checkpoint", 97);
     const checkpointId = id();
-    const { error } = await supabase
-      .from("checkpoints")
-      .insert({
-        id: checkpointId,
-        project_id: job.project_id,
-        branch_id: job.branch_id,
-        parent_checkpoint_id: job.snapshot.parentCheckpointId,
-        prompt_version_id: job.snapshot.promptVersionId,
-        job_id: job.id,
-        storage_path: storagePath,
-        mime_type: meta.mime,
-        sha256: meta.hash,
-        width: meta.width,
-        height: meta.height,
-        size_bytes: meta.size,
-      });
+    const { error } = await supabase.from("checkpoints").insert({
+      id: checkpointId,
+      project_id: job.project_id,
+      branch_id: job.branch_id,
+      parent_checkpoint_id: job.snapshot.parentCheckpointId,
+      prompt_version_id: job.snapshot.promptVersionId,
+      job_id: job.id,
+      storage_path: storagePath,
+      mime_type: meta.mime,
+      sha256: meta.hash,
+      width: meta.width,
+      height: meta.height,
+      size_bytes: meta.size,
+    });
     if (error) throw error;
+    if (job.snapshot.generationNodeId) {
+      const { data: generationNode } = await supabase
+        .from("canvas_nodes")
+        .select("position_x,position_y")
+        .eq("id", job.snapshot.generationNodeId)
+        .single();
+      const checkpointNodeId = id();
+      await supabase.from("canvas_nodes").insert({
+        id: checkpointNodeId,
+        project_id: job.project_id,
+        node_type: "checkpoint",
+        entity_id: checkpointId,
+        position_x: (generationNode?.position_x ?? 0) + 320,
+        position_y:
+          (generationNode?.position_y ?? 0) + job.snapshot.variationIndex * 220,
+      });
+      await supabase.from("canvas_edges").insert({
+        id: id(),
+        project_id: job.project_id,
+        source_node_id: job.snapshot.generationNodeId,
+        target_node_id: checkpointNodeId,
+        edge_type: "generation_output",
+        position: job.snapshot.variationIndex,
+      });
+    }
     await supabase
       .from("jobs")
       .update({

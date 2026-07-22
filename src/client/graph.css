@@ -1,0 +1,151 @@
+.material-node {
+  width: 120px;
+  background: #fff;
+  border: 2px solid #ddd7cc;
+  border-radius: 10px;
+  padding: 7px;
+  box-shadow: 0 3px 12px #0001;
+}
+.material-node img {
+  width: 100%;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+.material-node span {
+  display: block;
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 5px;
+}
+.group-node {
+  width: 230px;
+  min-height: 125px;
+  background: #f6f2ff;
+  border: 2px solid;
+  border-radius: 14px;
+  padding: 12px;
+  box-shadow: 0 5px 18px #0001;
+}
+.group-node.input-selected {
+  outline: 3px solid #5d4c7c;
+  outline-offset: 3px;
+}
+.group-node > strong,
+.group-node > small {
+  display: block;
+}
+.group-node > textarea {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 8px;
+  resize: vertical;
+  border: 1px solid #d9d0e8;
+  border-radius: 6px;
+  background: #fff;
+  padding: 6px;
+  font-size: 9px;
+  line-height: 1.35;
+}
+.group-node > small {
+  font: 400 8px DM Mono;
+  color: #888;
+  margin-top: 3px;
+}
+.group-node > div {
+  display: flex;
+  gap: 5px;
+  margin-top: 12px;
+}
+.group-node > div span {
+  position: relative;
+}
+.group-node > div img {
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 5px;
+  cursor: zoom-in;
+}
+.group-node > div b {
+  position: absolute;
+  z-index: 1;
+  background: #222;
+  color: #fff;
+  border-radius: 50%;
+  font: 500 7px DM Mono;
+  width: 13px;
+  height: 13px;
+  display: grid;
+  place-items: center;
+  right: -2px;
+  top: -3px;
+}
+.generation-node {
+  width: 270px;
+  background: #fff8e7;
+  border: 2px solid #d7bd77;
+  border-radius: 14px;
+  padding: 12px;
+  box-shadow: 0 5px 18px #0001;
+}
+.generation-node > strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.generation-node textarea {
+  width: 100%;
+  height: 72px;
+  resize: none;
+  margin: 9px 0;
+  border: 1px solid #ddd1b2;
+  border-radius: 7px;
+  padding: 7px;
+  font-size: 10px;
+}
+.generation-node > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font: 400 8px DM Mono;
+}
+.generation-node button {
+  border: 0;
+  background: #29271f;
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 11px;
+  cursor: pointer;
+}
+.choice-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: #0008;
+  display: grid;
+  place-items: center;
+}
+.choice-modal > div {
+  width: 340px;
+  background: #fff;
+  border-radius: 14px;
+  padding: 22px;
+  box-shadow: 0 20px 60px #0005;
+}
+.choice-modal p {
+  font-size: 12px;
+  color: #777;
+}
+.choice-modal button {
+  width: 100%;
+  padding: 9px;
+  margin-top: 6px;
+  border: 1px solid #d5d2ca;
+  background: #f8f7f3;
+  border-radius: 7px;
+  cursor: pointer;
+}

@@ -1,0 +1,1 @@
+.group-chips{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 10px}.group-chips button{border:1px solid;background:#fff;border-radius:99px;padding:5px 8px;font-size:8px;cursor:pointer}.group-chips button.active{background:#292722;color:#fff}

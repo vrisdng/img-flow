@@ -9,6 +9,7 @@ import { config } from "./config.js";
 import { emit, id, must, now, supabase } from "./db.js";
 import { downloadStored, inspectImage, storeMaterial } from "./storage.js";
 import type { ImageSettings, JobSnapshot } from "./types.js";
+import { resolveGroups, wouldCreateCycle } from "./group-resolver.js";
 const app = express();
 app.use(cors({ origin: ["http://127.0.0.1:5173", "http://localhost:5173"] }));
 app.use(express.json({ limit: "1mb" }));
@@ -20,6 +21,61 @@ const unwrap = (r: any): any => {
   if (r.error) throw new Error(r.error.message);
   return r.data;
 };
+async function resolveProjectGroups(projectId: string, rootIds: string[]) {
+  const [
+    { data: groups },
+    { data: members },
+    { data: nodes },
+    { data: edges },
+  ] = await Promise.all([
+    supabase
+      .from("material_groups")
+      .select("id,label")
+      .eq("project_id", projectId),
+    supabase
+      .from("material_group_members")
+      .select("*")
+      .in(
+        "group_id",
+        rootIds.length
+          ? ((
+              await supabase
+                .from("material_groups")
+                .select("id")
+                .eq("project_id", projectId)
+            ).data?.map((g: any) => g.id) ?? [])
+          : [],
+      ),
+    supabase
+      .from("canvas_nodes")
+      .select("id,entity_id,config_json")
+      .eq("project_id", projectId)
+      .eq("node_type", "group"),
+    supabase
+      .from("canvas_edges")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("edge_type", "group_include"),
+  ]);
+  const nodeGroup = new Map((nodes ?? []).map((n: any) => [n.id, n.entity_id]));
+  const notesByGroup = new Map(
+    (nodes ?? []).map((n: any) => [n.entity_id, n.config_json?.notes ?? ""]),
+  );
+  return resolveGroups(
+    rootIds,
+    (groups ?? []).map((group: any) => ({
+      ...group,
+      notes: notesByGroup.get(group.id) ?? "",
+    })),
+    members ?? [],
+    (edges ?? []).map((e: any) => ({
+      source_group_id: nodeGroup.get(e.source_node_id),
+      target_group_id: nodeGroup.get(e.target_node_id),
+      position: e.position,
+    })),
+    15,
+  );
+}
 app.get("/api/health", async (_q, res, next) => {
   try {
     const { error } = await supabase
@@ -95,7 +151,7 @@ app.patch("/api/projects/:id", async (req, res, next) => {
 });
 app.get("/api/projects/:id/workspace", async (req, res, next) => {
   try {
-    const [pr, ma, pv, cp, jo] = await Promise.all([
+    const [pr, ma, pv, cp, jo, gr, gm, cn, ce] = await Promise.all([
       supabase
         .from("projects")
         .select("*")
@@ -122,6 +178,30 @@ app.get("/api/projects/:id/workspace", async (req, res, next) => {
         .eq("project_id", req.params.id)
         .order("created_at", { ascending: false })
         .limit(100),
+      supabase
+        .from("material_groups")
+        .select("*")
+        .eq("project_id", req.params.id)
+        .order("created_at"),
+      supabase
+        .from("material_group_members")
+        .select("*")
+        .in(
+          "group_id",
+          (
+            await supabase
+              .from("material_groups")
+              .select("id")
+              .eq("project_id", req.params.id)
+          ).data?.map((g: any) => g.id) ?? [],
+        )
+        .order("position"),
+      supabase.from("canvas_nodes").select("*").eq("project_id", req.params.id),
+      supabase
+        .from("canvas_edges")
+        .select("*")
+        .eq("project_id", req.params.id)
+        .order("position"),
     ]);
     if (pr.error || !pr.data) return res.sendStatus(404);
     res.json({
@@ -138,6 +218,17 @@ app.get("/api/projects/:id/workspace", async (req, res, next) => {
         snapshot: j.snapshot_json,
         snapshot_json: undefined,
       })),
+      groups: unwrap(gr).map((group: any) => ({
+        ...group,
+        notes:
+          unwrap(cn).find(
+            (node: any) =>
+              node.node_type === "group" && node.entity_id === group.id,
+          )?.config_json?.notes ?? "",
+      })),
+      groupMembers: unwrap(gm),
+      canvasNodes: unwrap(cn),
+      canvasEdges: unwrap(ce),
     });
   } catch (e) {
     next(e);
@@ -207,12 +298,10 @@ app.delete("/api/materials/:id", async (req, res, next) => {
       .eq("material_id", req.params.id)
       .limit(1);
     if (used?.length)
-      return res
-        .status(409)
-        .json({
-          error:
-            "This material is part of immutable job history and cannot be deleted.",
-        });
+      return res.status(409).json({
+        error:
+          "This material is part of immutable job history and cannot be deleted.",
+      });
     unwrap(
       await supabase
         .from("materials")
@@ -229,13 +318,376 @@ app.delete("/api/materials/:id", async (req, res, next) => {
     next(e);
   }
 });
+app.post("/api/projects/:id/groups", async (req, res, next) => {
+  try {
+    const label = z.string().trim().min(1).max(80).parse(req.body.label);
+    const groupId = id(),
+      nodeId = id();
+    const group = unwrap(
+      await supabase
+        .from("material_groups")
+        .insert({
+          id: groupId,
+          project_id: req.params.id,
+          label,
+          color: req.body.color ?? "#8b8b92",
+        })
+        .select()
+        .single(),
+    );
+    await supabase.from("canvas_nodes").insert({
+      id: nodeId,
+      project_id: req.params.id,
+      node_type: "group",
+      entity_id: groupId,
+      position_x: Number(req.body.x ?? 100),
+      position_y: Number(req.body.y ?? 100),
+    });
+    await emit("graph.updated", req.params.id, { kind: "group.created" });
+    res.status(201).json({ ...group, nodeId });
+  } catch (e) {
+    next(e);
+  }
+});
+app.patch("/api/groups/:id", async (req, res, next) => {
+  try {
+    const values: any = { updated_at: now() };
+    if (req.body.label !== undefined)
+      values.label = z.string().trim().min(1).max(80).parse(req.body.label);
+    if (req.body.color !== undefined)
+      values.color = z
+        .string()
+        .regex(/^#[0-9a-f]{6}$/i)
+        .parse(req.body.color);
+    if (req.body.notes !== undefined) {
+      const notes = z.string().max(4000).parse(req.body.notes);
+      const { data: groupNode } = await supabase
+        .from("canvas_nodes")
+        .select("id,config_json")
+        .eq("node_type", "group")
+        .eq("entity_id", req.params.id)
+        .maybeSingle();
+      if (groupNode)
+        unwrap(
+          await supabase
+            .from("canvas_nodes")
+            .update({
+              config_json: { ...(groupNode.config_json ?? {}), notes },
+              updated_at: now(),
+            })
+            .eq("id", groupNode.id),
+        );
+    }
+    const data = unwrap(
+      await supabase
+        .from("material_groups")
+        .update(values)
+        .eq("id", req.params.id)
+        .select()
+        .single(),
+    );
+    await emit("graph.updated", data.project_id, { kind: "group.updated" });
+    res.json(data);
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/groups/:id/members", async (req, res, next) => {
+  try {
+    const input = z
+      .object({
+        materialId: z.string().uuid(),
+        mode: z.enum(["copy", "move"]).default("copy"),
+      })
+      .parse(req.body);
+    const { data: group } = await supabase
+      .from("material_groups")
+      .select("project_id")
+      .eq("id", req.params.id)
+      .single();
+    const { data: material } = await supabase
+      .from("materials")
+      .select("project_id")
+      .eq("id", input.materialId)
+      .single();
+    if (!group || !material || group.project_id !== material.project_id)
+      return res
+        .status(400)
+        .json({ error: "Group and material must belong to the same project." });
+    if (input.mode === "move")
+      await supabase
+        .from("material_group_members")
+        .delete()
+        .eq("material_id", input.materialId);
+    const { data: last } = await supabase
+      .from("material_group_members")
+      .select("position")
+      .eq("group_id", req.params.id)
+      .order("position", { ascending: false })
+      .limit(1);
+    await supabase.from("material_group_members").upsert({
+      group_id: req.params.id,
+      material_id: input.materialId,
+      position: (last?.[0]?.position ?? -1) + 1,
+    });
+    await emit("graph.updated", group.project_id, {
+      kind: "membership.updated",
+    });
+    res.sendStatus(204);
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete(
+  "/api/groups/:groupId/members/:materialId",
+  async (req, res, next) => {
+    try {
+      const { data: g } = await supabase
+        .from("material_groups")
+        .select("project_id")
+        .eq("id", req.params.groupId)
+        .single();
+      await supabase
+        .from("material_group_members")
+        .delete()
+        .eq("group_id", req.params.groupId)
+        .eq("material_id", req.params.materialId);
+      if (g)
+        await emit("graph.updated", g.project_id, {
+          kind: "membership.deleted",
+        });
+      res.sendStatus(204);
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+app.post("/api/projects/:id/canvas/nodes", async (req, res, next) => {
+  try {
+    const input = z
+      .object({
+        nodeType: z.enum(["material", "generation", "checkpoint"]),
+        entityId: z.string().uuid().nullable().optional(),
+        x: z.number(),
+        y: z.number(),
+        config: z.record(z.any()).default({}),
+      })
+      .parse(req.body);
+    const node = unwrap(
+      await supabase
+        .from("canvas_nodes")
+        .insert({
+          id: id(),
+          project_id: req.params.id,
+          node_type: input.nodeType,
+          entity_id: input.entityId ?? null,
+          position_x: input.x,
+          position_y: input.y,
+          config_json: input.config,
+        })
+        .select()
+        .single(),
+    );
+    await emit("graph.updated", req.params.id, { kind: "node.created" });
+    res.status(201).json(node);
+  } catch (e) {
+    next(e);
+  }
+});
+app.patch("/api/canvas/nodes/:id", async (req, res, next) => {
+  try {
+    const values: any = { updated_at: now() };
+    if (req.body.x !== undefined) values.position_x = Number(req.body.x);
+    if (req.body.y !== undefined) values.position_y = Number(req.body.y);
+    if (req.body.config !== undefined) values.config_json = req.body.config;
+    const node = unwrap(
+      await supabase
+        .from("canvas_nodes")
+        .update(values)
+        .eq("id", req.params.id)
+        .select()
+        .single(),
+    );
+    await emit("graph.updated", node.project_id, { kind: "node.updated" });
+    res.json(node);
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete("/api/canvas/nodes/:id", async (req, res, next) => {
+  try {
+    const { data: n } = await supabase
+      .from("canvas_nodes")
+      .select("project_id,node_type,entity_id")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    if (!n) return res.status(404).json({ error: "Canvas node not found." });
+    unwrap(
+      await supabase.from("canvas_nodes").delete().eq("id", req.params.id),
+    );
+    if (n?.node_type === "group")
+      await supabase.from("material_groups").delete().eq("id", n.entity_id);
+    if (n) await emit("graph.updated", n.project_id, { kind: "node.deleted" });
+    res.sendStatus(204);
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/projects/:id/canvas/edges", async (req, res, next) => {
+  try {
+    const input = z
+      .object({
+        source: z.string().uuid(),
+        target: z.string().uuid(),
+        sourcePosition: z.object({ x: z.number(), y: z.number() }).optional(),
+        targetPosition: z.object({ x: z.number(), y: z.number() }).optional(),
+      })
+      .parse(req.body);
+    // Older checkpoints predate canvas_nodes and are rendered with their
+    // checkpoint ID. Materialize the graph node on first connection.
+    const normalizeEndpoint = async (
+      endpointId: string,
+      position?: { x: number; y: number },
+    ) => {
+      const { data: existing } = await supabase
+        .from("canvas_nodes")
+        .select("id")
+        .eq("id", endpointId)
+        .eq("project_id", req.params.id)
+        .maybeSingle();
+      if (existing) return existing.id;
+      const { data: checkpoint } = await supabase
+        .from("checkpoints")
+        .select("id")
+        .eq("id", endpointId)
+        .eq("project_id", req.params.id)
+        .maybeSingle();
+      if (!checkpoint) return endpointId;
+      const node = unwrap(
+        await supabase
+          .from("canvas_nodes")
+          .insert({
+            id: id(),
+            project_id: req.params.id,
+            node_type: "checkpoint",
+            entity_id: checkpoint.id,
+            position_x: position?.x ?? 0,
+            position_y: position?.y ?? 0,
+            config_json: {},
+          })
+          .select("id")
+          .single(),
+      );
+      return node.id;
+    };
+    const sourceId = await normalizeEndpoint(
+      input.source,
+      input.sourcePosition,
+    );
+    const targetId = await normalizeEndpoint(
+      input.target,
+      input.targetPosition,
+    );
+    const { data: nodes } = await supabase
+      .from("canvas_nodes")
+      .select("*")
+      .eq("project_id", req.params.id)
+      .in("id", [sourceId, targetId]);
+    if (nodes?.length !== 2)
+      return res
+        .status(400)
+        .json({ error: "Both nodes must belong to this project." });
+    const source = nodes.find((n: any) => n.id === sourceId),
+      target = nodes.find((n: any) => n.id === targetId);
+    let edgeType: string;
+    if (source.node_type === "group" && target.node_type === "group") {
+      edgeType = "group_include";
+      const { data: all } = await supabase
+        .from("canvas_edges")
+        .select("source_node_id,target_node_id")
+        .eq("project_id", req.params.id)
+        .eq("edge_type", "group_include");
+      const nodeGroup = new Map(nodes.map((n: any) => [n.id, n.entity_id]));
+      const { data: groupNodes } = await supabase
+        .from("canvas_nodes")
+        .select("id,entity_id")
+        .eq("project_id", req.params.id)
+        .eq("node_type", "group");
+      for (const n of groupNodes ?? []) nodeGroup.set(n.id, n.entity_id);
+      const groupEdges = (all ?? []).map((e: any) => ({
+        source_group_id: nodeGroup.get(e.source_node_id),
+        target_group_id: nodeGroup.get(e.target_node_id),
+        position: 0,
+      }));
+      if (wouldCreateCycle(groupEdges, source.entity_id, target.entity_id))
+        return res
+          .status(409)
+          .json({ error: "This link would create a group cycle." });
+    } else if (
+      source.node_type === "group" &&
+      target.node_type === "generation"
+    )
+      edgeType = "group_input";
+    else if (
+      source.node_type === "checkpoint" &&
+      target.node_type === "generation"
+    )
+      edgeType = "checkpoint_input";
+    else
+      return res.status(400).json({
+        error:
+          "Unsupported connection. Connect groups to groups/generations or checkpoints to generations.",
+      });
+    const { data: last } = await supabase
+      .from("canvas_edges")
+      .select("position")
+      .eq("target_node_id", targetId)
+      .order("position", { ascending: false })
+      .limit(1);
+    const edge = unwrap(
+      await supabase
+        .from("canvas_edges")
+        .insert({
+          id: id(),
+          project_id: req.params.id,
+          source_node_id: sourceId,
+          target_node_id: targetId,
+          edge_type: edgeType,
+          position: (last?.[0]?.position ?? -1) + 1,
+        })
+        .select()
+        .single(),
+    );
+    await emit("graph.updated", req.params.id, { kind: "edge.created" });
+    res.status(201).json(edge);
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete("/api/canvas/edges/:id", async (req, res, next) => {
+  try {
+    const { data: e } = await supabase
+      .from("canvas_edges")
+      .delete()
+      .eq("id", req.params.id)
+      .select()
+      .single();
+    if (e) await emit("graph.updated", e.project_id, { kind: "edge.deleted" });
+    res.sendStatus(204);
+  } catch (e) {
+    next(e);
+  }
+});
 const jobSchema = z.object({
   prompt: z.string().trim().min(1).max(32000),
   parentCheckpointId: z.string().uuid().nullable().optional(),
   parentPromptVersionId: z.string().uuid().nullable().optional(),
-    materialIds: z.array(z.string().uuid()).max(5).default([]),
+  materialIds: z.array(z.string().uuid()).max(15).default([]),
   variations: z.number().int().min(1).max(4).default(1),
   idempotencyKey: z.string().min(8).max(200),
+  generationNodeId: z.string().uuid().nullable().optional(),
+  groupSnapshots: z.array(z.any()).default([]),
+  groupIds: z.array(z.string().uuid()).default([]),
   settings: z.object({
     size: z.enum(["1024x1024", "1024x1536", "1536x1024"]).default("1024x1024"),
     quality: z.enum(["low", "medium", "high"]).default("medium"),
@@ -246,6 +698,20 @@ const jobSchema = z.object({
 app.post("/api/projects/:id/jobs", async (req, res, next) => {
   try {
     const input = jobSchema.parse(req.body);
+    if (input.groupIds.length) {
+      const resolved = await resolveProjectGroups(
+        req.params.id,
+        input.groupIds,
+      );
+      input.materialIds = [
+        ...new Set([...resolved.materialIds, ...input.materialIds]),
+      ];
+      if (input.materialIds.length > 15)
+        return res.status(400).json({
+          error: `Quick inputs resolve to ${input.materialIds.length} materials; maximum is 15.`,
+        });
+      input.groupSnapshots = resolved.groupSnapshots;
+    }
     const { data: existing } = await supabase
       .from("jobs")
       .select("*")
@@ -267,11 +733,9 @@ app.post("/api/projects/:id/jobs", async (req, res, next) => {
         .eq("project_id", req.params.id)
         .maybeSingle();
       if (!data)
-        return res
-          .status(400)
-          .json({
-            error: "Parent checkpoint does not belong to this project.",
-          });
+        return res.status(400).json({
+          error: "Parent checkpoint does not belong to this project.",
+        });
     }
     if (input.materialIds.length) {
       const { data } = await supabase
@@ -280,11 +744,9 @@ app.post("/api/projects/:id/jobs", async (req, res, next) => {
         .eq("project_id", req.params.id)
         .in("id", input.materialIds);
       if (data?.length !== input.materialIds.length)
-        return res
-          .status(400)
-          .json({
-            error: "A selected material does not belong to this project.",
-          });
+        return res.status(400).json({
+          error: "A selected material does not belong to this project.",
+        });
     }
     const promptId = id(),
       branchId = id();
@@ -320,6 +782,8 @@ app.post("/api/projects/:id/jobs", async (req, res, next) => {
           settings: input.settings as ImageSettings,
           model: config.model,
           variationIndex,
+          groupSnapshots: input.groupSnapshots,
+          generationNodeId: input.generationNodeId ?? null,
         };
         return {
           id: id(),
@@ -352,19 +816,139 @@ app.post("/api/projects/:id/jobs", async (req, res, next) => {
       .from("projects")
       .update({ updated_at: now() })
       .eq("id", req.params.id);
-    res
-      .status(202)
-      .json(
-        created.map((j: any) => ({
-          ...j,
-          snapshot: j.snapshot_json,
-          snapshot_json: undefined,
-        })),
-      );
+    res.status(202).json(
+      created.map((j: any) => ({
+        ...j,
+        snapshot: j.snapshot_json,
+        snapshot_json: undefined,
+      })),
+    );
   } catch (e) {
     next(e);
   }
 });
+app.post(
+  "/api/projects/:projectId/generation-nodes/:nodeId/run",
+  async (req, res, next) => {
+    try {
+      const { projectId, nodeId } = req.params;
+      const [
+        { data: node },
+        { data: nodes },
+        { data: edges },
+        { data: groups },
+        { data: members },
+      ] = await Promise.all([
+        supabase
+          .from("canvas_nodes")
+          .select("*")
+          .eq("id", nodeId)
+          .eq("project_id", projectId)
+          .eq("node_type", "generation")
+          .single(),
+        supabase.from("canvas_nodes").select("*").eq("project_id", projectId),
+        supabase
+          .from("canvas_edges")
+          .select("*")
+          .eq("project_id", projectId)
+          .order("position"),
+        supabase
+          .from("material_groups")
+          .select("id,label")
+          .eq("project_id", projectId),
+        supabase
+          .from("material_group_members")
+          .select("*")
+          .in(
+            "group_id",
+            (
+              await supabase
+                .from("material_groups")
+                .select("id")
+                .eq("project_id", projectId)
+            ).data?.map((g: any) => g.id) ?? [],
+          ),
+      ]);
+      if (!node) return res.sendStatus(404);
+      const byNode = new Map<string, any>(
+        (nodes ?? []).map((n: any) => [n.id, n]),
+      );
+      const inbound = (edges ?? []).filter(
+        (e: any) => e.target_node_id === nodeId,
+      );
+      const rootIds = inbound
+        .filter((e: any) => e.edge_type === "group_input")
+        .map((e: any) => byNode.get(e.source_node_id)?.entity_id)
+        .filter(Boolean);
+      const groupEdges = (edges ?? [])
+        .filter((e: any) => e.edge_type === "group_include")
+        .map((e: any) => ({
+          source_group_id: byNode.get(e.source_node_id)?.entity_id,
+          target_group_id: byNode.get(e.target_node_id)?.entity_id,
+          position: e.position,
+        }));
+      const resolved = resolveGroups(
+        rootIds,
+        (groups ?? []).map((group: any) => ({
+          ...group,
+          notes:
+            (nodes ?? []).find(
+              (candidate: any) =>
+                candidate.node_type === "group" &&
+                candidate.entity_id === group.id,
+            )?.config_json?.notes ?? "",
+        })),
+        members ?? [],
+        groupEdges,
+        15,
+      );
+      const bases = inbound.filter(
+        (e: any) => e.edge_type === "checkpoint_input",
+      );
+      if (bases.length > 1)
+        return res.status(400).json({
+          error: "A generation node can have only one base checkpoint.",
+        });
+      const parentCheckpointId = bases[0]
+        ? byNode.get(bases[0].source_node_id)?.entity_id
+        : null;
+      const configJson = node.config_json ?? {};
+      const prompt = z
+        .string()
+        .trim()
+        .min(1)
+        .max(32000)
+        .parse(configJson.prompt);
+      const body = {
+        prompt,
+        parentCheckpointId,
+        materialIds: resolved.materialIds,
+        variations: Number(configJson.variations ?? 1),
+        idempotencyKey: crypto.randomUUID(),
+        settings: configJson.settings ?? {
+          size: "1024x1024",
+          quality: "medium",
+          background: "auto",
+          outputFormat: "png",
+        },
+        generationNodeId: nodeId,
+        groupSnapshots: resolved.groupSnapshots,
+      };
+      const response = await fetch(
+        `http://${config.host}:${config.port}/api/projects/${projectId}/jobs`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const result = await response.json();
+      res.status(response.status).json(result);
+    } catch (e) {
+      next(e);
+    }
+  },
+);
 app.post("/api/jobs/:id/cancel", async (req, res, next) => {
   try {
     const { data: job } = await supabase
