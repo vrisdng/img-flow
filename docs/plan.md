@@ -1,0 +1,1 @@
+Mask drawing/inpainting, prompt optimization by a second language model, image comparison scoring, sharing, and production object storage

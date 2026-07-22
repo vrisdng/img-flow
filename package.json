@@ -1,0 +1,42 @@
+{
+  "name": "image-flow",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k --success first -n api,worker,web -c blue,magenta,green \"tsx src/server.ts\" \"tsx src/worker.ts\" \"vite --strictPort\"",
+    "build": "tsc -b && vite build",
+    "start": "concurrently -k \"node dist-server/server.js\" \"node dist-server/worker.js\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@supabase/server": "^1.4.0",
+    "@xyflow/react": "^12.8.5",
+    "archiver": "^7.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.0",
+    "express": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "multer": "^2.0.2",
+    "openai": "^5.10.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "sharp": "^0.35.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.3",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.3",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^24.0.13",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "concurrently": "^9.2.0",
+    "tsx": "^4.20.3",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
+  }
+}

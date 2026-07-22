@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+dist-web/
+dist-server/
+*.tsbuildinfo
+
+# Test and tool output
+coverage/
+.vite/
+.cache/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Supabase local state (keep config and migrations)
+supabase/.branches/
+supabase/.temp/
+
+# Local application data from older versions
+.image-flow/
+
+# Archives and packaged copies
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

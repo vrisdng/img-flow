@@ -1,0 +1,5 @@
+.job-copy { min-width: 0; }
+.progress-track { height: 4px; background: #dfddd6; border-radius: 9px; margin-top: 8px; overflow: hidden; }
+.progress-track span { display: block; height: 100%; background: #6c7859; border-radius: 9px; transition: width .45s ease; }
+.progress-caption { display: flex; justify-content: space-between; margin-top: 3px; font: 400 7px DM Mono; color: #99968e; }
+.progress-caption b { font-weight: 500; }
